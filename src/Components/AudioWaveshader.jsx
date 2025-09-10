@@ -1,42 +1,42 @@
 // src/AudioWaterShader.jsx
 import React, { useEffect, useRef } from "react";
 import * as THREE from "three";
-import { Pane } from "tweakpane";
 
 export default function AudioWaterShader() {
   const containerRef = useRef(null);
   const audioBtnRef = useRef(null);
-  const helpHintRef = useRef(null);
-  const paneRef = useRef(null);
 
   useEffect(() => {
-    if (!containerRef.current) return;
+    const container = containerRef.current;
+    if (!container) return;
 
-    // --- Basic scene setup ---
+    // --- Renderer & scene (append ONLY to the container) ---
     const scene = new THREE.Scene();
+    // full-screen quad uses an orthographic camera
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    containerRef.current.appendChild(renderer.domElement);
+    camera.position.z = 1;
 
-    // state-like variables (kept here inside the effect)
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    // ensure no second canvas by cleaning any existing children (helps HMR/dev)
+    while (container.firstChild) container.removeChild(container.firstChild);
+
+    // style canvas to fill the container
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
+    renderer.domElement.style.touchAction = "none"; // better touch behavior
+    container.appendChild(renderer.domElement);
+
+    // Helper to size renderer to container
+    
+
+    // --- Audio setup ---
     let isPlaying = false;
     let audioContext = null;
     let analyser = null;
     let dataArray = null;
     let sourceNode = null;
-    let panelVisible = false;
-    let bassMonitor, midMonitor, trebleMonitor, overallMonitor;
 
-    const audioLevels = {
-      bassLevel: 0,
-      midLevel: 0,
-      trebleLevel: 0,
-      overallLevel: 0
-    };
-
-    // --- Audio element ---
     const audio = new Audio();
     audio.src = "https://assets.codepen.io/7558/xor-is-epic-1446.mp3";
     audio.preload = "auto";
@@ -50,68 +50,52 @@ export default function AudioWaterShader() {
     });
     audio.load();
 
-    function initAudioAnalysis() {
-      try {
-        if (!audioContext) {
-          audioContext = new (window.AudioContext || window.webkitAudioContext)();
-          analyser = audioContext.createAnalyser();
-          analyser.fftSize = 256;
-          analyser.smoothingTimeConstant = 0.8;
-          const bufferLength = analyser.frequencyBinCount;
-          dataArray = new Uint8Array(bufferLength);
-          sourceNode = audioContext.createMediaElementSource(audio);
-          sourceNode.connect(analyser);
-          analyser.connect(audioContext.destination);
-          console.log("Web Audio API initialized successfully");
-        }
-      } catch (e) {
-        console.warn("Web Audio API failed to initialize:", e);
-        analyser = null;
-        dataArray = null;
+    async function initAudioAnalysis() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        // resume ensures the context works after user gesture
+        try { await audioContext.resume(); } catch (e) { /* ignore */ }
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.8;
+        dataArray = new Uint8Array(analyser.frequencyBinCount);
+        sourceNode = audioContext.createMediaElementSource(audio);
+        sourceNode.connect(analyser);
+        analyser.connect(audioContext.destination);
       }
     }
 
-    // --- Water settings and buffers ---
+    // --- Water simulation buffers & settings (kept similar to your original) ---
     const waterSettings = {
       resolution: 256,
-      damping: 0.913,
-      tension: 0.02,
-      rippleStrength: 0.2,
-      mouseIntensity: 1.2,
-      clickIntensity: 3.0,
       rippleRadius: 8,
-      splatForce: 50000,
-      splatThickness: 0.1,
-      vorticityInfluence: 0.2,
-      swirlIntensity: 0.2,
-      pressure: 0.3,
-      velocityDissipation: 0.08,
-      densityDissipation: 1.0,
-      displacementScale: 0.01
+      spiralIntensity: 0.2,
+      waveHeight: 0.01,
+      motionDecay: 0.08,
+      rippleDecay: 1.0
     };
 
     const resolution = waterSettings.resolution;
-    let waterBuffers = {
+    const waterBuffers = {
       current: new Float32Array(resolution * resolution),
       previous: new Float32Array(resolution * resolution),
       velocity: new Float32Array(resolution * resolution * 2),
-      vorticity: new Float32Array(resolution * resolution),
-      pressure: new Float32Array(resolution * resolution)
+      vorticity: new Float32Array(resolution * resolution)
     };
-
+    // zero initialize (already zero but explicit)
     for (let i = 0; i < resolution * resolution; i++) {
-      waterBuffers.current[i] = 0.0;
-      waterBuffers.previous[i] = 0.0;
-      waterBuffers.velocity[i * 2] = 0.0;
-      waterBuffers.velocity[i * 2 + 1] = 0.0;
-      waterBuffers.vorticity[i] = 0.0;
-      waterBuffers.pressure[i] = 0.0;
+      waterBuffers.current[i] = 0;
+      waterBuffers.previous[i] = 0;
+      waterBuffers.vorticity[i] = 0;
+      waterBuffers.velocity[i * 2] = 0;
+      waterBuffers.velocity[i * 2 + 1] = 0;
     }
 
+    // DataTexture (FloatType - common in modern browsers). Keep an eye if you need WebGL2.
     const waterTexture = new THREE.DataTexture(
       waterBuffers.current,
-      waterSettings.resolution,
-      waterSettings.resolution,
+      resolution,
+      resolution,
       THREE.RedFormat,
       THREE.FloatType
     );
@@ -119,86 +103,7 @@ export default function AudioWaterShader() {
     waterTexture.magFilter = THREE.LinearFilter;
     waterTexture.needsUpdate = true;
 
-    // --- Text canvas creation ---
-    function createTextTexture() {
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = width * dpr;
-      canvas.height = height * dpr;
-      ctx.scale(dpr, dpr);
-      ctx.clearRect(0, 0, width, height);
-      ctx.textRenderingOptimization = "optimizeQuality";
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = "high";
-      const scale = Math.max(0.4, Math.min(1.2, width / 1920));
-      const paragraphSize = Math.max(16, Math.min(28, 22 * scale));
-      const paragraphText =
-        "Love is the one thing we're capable of perceiving that transcends\ndimensions of time and space. Through the tesseract, we glimpse\nthe fourth dimension where past, present, and future converge.\nWe are not bound by linear time—we are its architects.";
-      ctx.font = `400 ${paragraphSize}px "GT Standard", Arial, sans-serif`;
-      ctx.fillStyle = "#ffffff";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      const paragraphLines = paragraphText.split("\n");
-      const lineHeight = paragraphSize * 1.3;
-      const totalTextHeight = paragraphLines.length * lineHeight;
-      const startY = height / 2 - totalTextHeight / 2 + lineHeight / 2;
-      paragraphLines.forEach((line, index) => {
-        const y = startY + index * lineHeight;
-        ctx.fillText(line, width / 2, y);
-      });
-      return canvas;
-    }
-
-    // --- Color presets ---
-    const colorPresets = {
-      "Electric Blue": {
-        color1: [0.0, 0.5, 1.0],
-        color2: [0.0, 0.8, 1.0],
-        color3: [0.2, 0.3, 1.0],
-        background: [0.0, 0.05, 0.1]
-      },
-      "Neon Pink": {
-        color1: [1.0, 0.0, 0.5],
-        color2: [1.0, 0.3, 0.7],
-        color3: [0.9, 0.1, 0.6],
-        background: [0.1, 0.0, 0.05]
-      },
-      "Cyber Green": {
-        color1: [0.0, 1.0, 0.3],
-        color2: [0.2, 0.9, 0.1],
-        color3: [0.0, 0.8, 0.2],
-        background: [0.0, 0.1, 0.02]
-      },
-      "Golden Hour": {
-        color1: [1.0, 0.7, 0.2],
-        color2: [1.0, 0.9, 0.3],
-        color3: [0.9, 0.6, 0.1],
-        background: [0.1, 0.05, 0.0]
-      },
-      "Deep Purple": {
-        color1: [0.6, 0.2, 1.0],
-        color2: [0.8, 0.4, 0.9],
-        color3: [0.4, 0.1, 0.7],
-        background: [0.05, 0.0, 0.1]
-      },
-      "Ice White": {
-        color1: [1.0, 1.0, 1.0],
-        color2: [0.9, 0.95, 1.0],
-        color3: [0.8, 0.9, 1.0],
-        background: [0.02, 0.02, 0.05]
-      },
-      "Pure Monochrome": {
-        color1: [1.0, 1.0, 1.0],
-        color2: [1.0, 1.0, 1.0],
-        color3: [1.0, 1.0, 1.0],
-        background: [0.0, 0.0, 0.0]
-      }
-    };
-
-    // --- Shaders ---
+    // --- Shaders (kept from your version, trimmed text parts removed) ---
     const vertexShader = `
       varying vec2 vUv;
       void main() {
@@ -220,44 +125,31 @@ export default function AudioWaterShader() {
       uniform float u_ripple_time;
       uniform vec2 u_ripple_position;
       uniform float u_ripple_strength;
-      uniform sampler2D u_textTexture;
-      uniform bool u_showText;
-      uniform bool u_isMonochrome;
       uniform float u_audioLow;
       uniform float u_audioMid;
       uniform float u_audioHigh;
       uniform float u_audioOverall;
       uniform float u_audioReactivity;
-      
       varying vec2 vUv;
 
       void main() {
         vec2 r = u_resolution;
         vec2 FC = gl_FragCoord.xy;
-        vec2 uv = vec2(FC.x / r.x, 1.0 - FC.y / r.y);
         vec2 screenP = (FC.xy * 2.0 - r) / r.y;
-        
         vec2 wCoord = vec2(FC.x / r.x, FC.y / r.y);
         float waterHeight = texture2D(u_waterTexture, wCoord).r;
         float waterInfluence = clamp(waterHeight * u_waterStrength, -0.5, 0.5);
-        
         float baseRadius = 0.9;
         float audioPulse = u_audioOverall * u_audioReactivity * 0.1;
-        float waterPulse = waterInfluence * 0.3;
-        float circleRadius = baseRadius + audioPulse + waterPulse;
-        
+        float circleRadius = baseRadius + audioPulse + waterInfluence * 0.3;
         float distFromCenter = length(screenP);
         float inCircle = smoothstep(circleRadius + 0.1, circleRadius - 0.1, distFromCenter);
-        
         vec4 o = vec4(0.0);
-        
         if (inCircle > 0.0) {
           vec2 p = screenP * 1.1;
-          
           float rippleTime = u_time - u_ripple_time;
           vec2 ripplePos = u_ripple_position * r;
           float rippleDist = distance(FC.xy, ripplePos);
-          
           float clickRipple = 0.0;
           if (rippleTime < 3.0 && rippleTime > 0.0) {
             float rippleRadius = rippleTime * 150.0;
@@ -265,61 +157,24 @@ export default function AudioWaterShader() {
             float rippleDecay = 1.0 - rippleTime / 3.0;
             clickRipple = exp(-abs(rippleDist - rippleRadius) / rippleWidth) * rippleDecay * u_ripple_strength;
           }
-          
           float totalWaterInfluence = clamp((waterInfluence + clickRipple * 0.1) * u_waterStrength, -0.8, 0.8);
           float audioInfluence = (u_audioLow * 0.3 + u_audioMid * 0.4 + u_audioHigh * 0.3) * u_audioReactivity;
-          
           float angle = length(p) * 4.0 + audioInfluence * 2.0;
           mat2 R = mat2(cos(angle), -sin(angle), sin(angle), cos(angle));
           p *= R;
-          
           float l = length(p) - 0.7 + totalWaterInfluence * 0.5 + audioInfluence * 0.2;
           float t = u_time * u_speed + totalWaterInfluence * 2.0 + audioInfluence * 1.5;
           float enhancedY = p.y + totalWaterInfluence * 0.3 + audioInfluence * 0.2;
-          
           float pattern1 = 0.5 + 0.5 * tanh(0.1 / max(l / 0.1, -l) - sin(l + enhancedY * max(1.0, -l / 0.1) + t));
           float pattern2 = 0.5 + 0.5 * tanh(0.1 / max(l / 0.1, -l) - sin(l + enhancedY * max(1.0, -l / 0.1) + t + 1.0));
           float pattern3 = 0.5 + 0.5 * tanh(0.1 / max(l / 0.1, -l) - sin(l + enhancedY * max(1.0, -l / 0.1) + t + 2.0));
-          
           float intensity = 1.0 + totalWaterInfluence * 0.5 + audioInfluence * 0.3;
-          
-          if (u_isMonochrome) {
-            float mono = (pattern1 + pattern2 + pattern3) / 3.0 * intensity;
-            o = vec4(mono, mono, mono, inCircle);
-          } else {
-            o.r = pattern1 * u_color1.r * intensity;
-            o.g = pattern2 * u_color2.g * intensity;
-            o.b = pattern3 * u_color3.b * intensity;
-            o.a = inCircle;
-          }
+          o.r = pattern1 * u_color1.r * intensity;
+          o.g = pattern2 * u_color2.g * intensity;
+          o.b = pattern3 * u_color3.b * intensity;
+          o.a = inCircle;
         }
-        
-        vec3 bgColor = u_isMonochrome ? vec3(0.0) : u_background;
-        vec3 finalColor = bgColor;
-        
-        finalColor = mix(finalColor, o.rgb, o.a);
-        
-        if (u_showText) {
-          vec2 waterCoords = vec2(FC.x / r.x, FC.y / r.y);
-          float step = 1.0 / r.x;
-          vec2 waterGrad = clamp(vec2(
-            texture2D(u_waterTexture, vec2(waterCoords.x + step, waterCoords.y)).r - 
-            texture2D(u_waterTexture, vec2(waterCoords.x - step, waterCoords.y)).r,
-            texture2D(u_waterTexture, vec2(waterCoords.x, waterCoords.y + step)).r - 
-            texture2D(u_waterTexture, vec2(waterCoords.x, waterCoords.y - step)).r
-          ) * u_waterStrength, -0.1, 0.1);
-          
-          vec2 textDistortedUV = uv + waterGrad * 0.15;
-          vec4 textColor = texture2D(u_textTexture, textDistortedUV);
-          
-          if (u_isMonochrome) {
-            float textLum = dot(textColor.rgb, vec3(0.299, 0.587, 0.114));
-            textColor = vec4(textLum, textLum, textLum, textColor.a);
-          }
-          
-          finalColor = mix(finalColor, textColor.rgb, textColor.a);
-        }
-        
+        vec3 finalColor = mix(u_background, o.rgb, o.a);
         gl_FragColor = vec4(finalColor, 1.0);
       }
     `;
@@ -330,7 +185,7 @@ export default function AudioWaterShader() {
       fragmentShader,
       uniforms: {
         u_time: { value: 0.0 },
-        u_resolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) },
+        u_resolution: { value: new THREE.Vector2(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight) },
         u_speed: { value: 1.3 },
         u_color1: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
         u_color2: { value: new THREE.Vector3(0.9, 0.95, 1.0) },
@@ -341,9 +196,6 @@ export default function AudioWaterShader() {
         u_ripple_time: { value: -10.0 },
         u_ripple_position: { value: new THREE.Vector2(0.5, 0.5) },
         u_ripple_strength: { value: 0.5 },
-        u_textTexture: { value: null },
-        u_showText: { value: true },
-        u_isMonochrome: { value: false },
         u_audioLow: { value: 0.0 },
         u_audioMid: { value: 0.0 },
         u_audioHigh: { value: 0.0 },
@@ -352,603 +204,248 @@ export default function AudioWaterShader() {
       }
     });
 
+
+    function setSizeToContainer() {
+      const width = container.clientWidth || window.innerWidth;
+      const height = container.clientHeight || window.innerHeight;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(width, height, false);
+      if (material && material.uniforms && material.uniforms.u_resolution) {
+        material.uniforms.u_resolution.value.set(width, height);
+      }
+    }
+    setSizeToContainer();
+
     const geometry = new THREE.PlaneGeometry(2, 2);
-    const mesh = new THREE.Mesh(geometry, material);
-    scene.add(mesh);
+    const quad = new THREE.Mesh(geometry, material);
+    scene.add(quad);
 
-    camera.position.z = 1;
-
-    // --- Settings object used by Tweakpane ---
-    const settings = {
-      preset: "Ice White",
-      animationSpeed: 1.3,
-      waterStrength: 0.55,
-      mouseIntensity: 1.2,
-      clickIntensity: 3.0,
-      rippleStrength: 0.5,
-      damping: 0.913,
-      showText: true,
-      audioVolume: 1.0,
-      impactForce: 50000,
-      rippleSize: 0.1,
-      swirlingMotion: 0.2,
-      spiralIntensity: 0.2,
-      fluidPressure: 0.3,
-      motionDecay: 0.08,
-      rippleDecay: 1.0,
-      waveHeight: 0.01,
-      audioReactivity: 1.0,
-      bassResponse: 1.0,
-      midResponse: 1.0,
-      trebleResponse: 1.0
-    };
-
-    // --- Audio analysis update ---
+    // --- Audio analysis update (update shader uniforms) ---
     function updateAudioAnalysis() {
       if (analyser && dataArray && isPlaying) {
         analyser.getByteFrequencyData(dataArray);
         const bassEnd = Math.floor(dataArray.length * 0.1);
         const midEnd = Math.floor(dataArray.length * 0.5);
-        let bass = 0,
-          mid = 0,
-          treble = 0;
+        let bass = 0, mid = 0, treble = 0;
         for (let i = 0; i < bassEnd; i++) bass += dataArray[i];
-        bass = (bass / bassEnd / 255) * settings.bassResponse;
+        bass = (bass / Math.max(1, bassEnd) / 255);
         for (let i = bassEnd; i < midEnd; i++) mid += dataArray[i];
-        mid = (mid / (midEnd - bassEnd) / 255) * settings.midResponse;
+        mid = (mid / Math.max(1, midEnd - bassEnd) / 255);
         for (let i = midEnd; i < dataArray.length; i++) treble += dataArray[i];
-        treble = (treble / (dataArray.length - midEnd) / 255) * settings.trebleResponse;
+        treble = (treble / Math.max(1, dataArray.length - midEnd) / 255);
         const overall = (bass + mid + treble) / 3;
-        // Update live audio level monitors
-        audioLevels.bassLevel = bass;
-        audioLevels.midLevel = mid;
-        audioLevels.trebleLevel = treble;
-        audioLevels.overallLevel = overall;
-        if (bassMonitor) {
-          bassMonitor.refresh();
-          midMonitor.refresh();
-          trebleMonitor.refresh();
-          overallMonitor.refresh();
-        }
         const smoothing = 0.8;
-        material.uniforms.u_audioLow.value =
-          material.uniforms.u_audioLow.value * smoothing + bass * (1 - smoothing);
-        material.uniforms.u_audioMid.value =
-          material.uniforms.u_audioMid.value * smoothing + mid * (1 - smoothing);
-        material.uniforms.u_audioHigh.value =
-          material.uniforms.u_audioHigh.value * smoothing + treble * (1 - smoothing);
-        material.uniforms.u_audioOverall.value =
-          material.uniforms.u_audioOverall.value * smoothing + overall * (1 - smoothing);
+        material.uniforms.u_audioLow.value = material.uniforms.u_audioLow.value * smoothing + bass * (1 - smoothing);
+        material.uniforms.u_audioMid.value = material.uniforms.u_audioMid.value * smoothing + mid * (1 - smoothing);
+        material.uniforms.u_audioHigh.value = material.uniforms.u_audioHigh.value * smoothing + treble * (1 - smoothing);
+        material.uniforms.u_audioOverall.value = material.uniforms.u_audioOverall.value * smoothing + overall * (1 - smoothing);
       }
     }
 
-    // --- Text texture setup ---
-    function setupTextTexture() {
-      const waitForFonts = () => {
-        Promise.all([
-          document.fonts.load('bold 80px "GT Standard"'),
-          document.fonts.load('400 24px "GT Standard"')
-        ])
-          .then(() => {
-            setTimeout(() => {
-              const textCanvas = createTextTexture();
-              const textTexture = new THREE.CanvasTexture(textCanvas);
-              textTexture.flipY = false;
-              textTexture.generateMipmaps = false;
-              textTexture.minFilter = THREE.LinearFilter;
-              textTexture.magFilter = THREE.LinearFilter;
-              material.uniforms.u_textTexture.value = textTexture;
-            }, 100);
-          })
-          .catch(() => {
-            setTimeout(() => {
-              const textCanvas = createTextTexture();
-              const textTexture = new THREE.CanvasTexture(textCanvas);
-              textTexture.flipY = false;
-              textTexture.generateMipmaps = false;
-              textTexture.minFilter = THREE.LinearFilter;
-              textTexture.magFilter = THREE.LinearFilter;
-              material.uniforms.u_textTexture.value = textTexture;
-            }, 1000);
-          });
-      };
-      waitForFonts();
-    }
-
-    // --- Water simulation update (ported as-is) ---
+    // --- Water sim update (simplified but compatible with your code) ---
     function updateWaterSimulation() {
       const { current, previous, velocity, vorticity } = waterBuffers;
-      const { damping, resolution } = waterSettings;
-      const safeTension = Math.min(waterSettings.tension, 0.05);
-      const velocityDissipation = settings.motionDecay;
-      const densityDissipation = settings.rippleDecay;
-      const vorticityInfluence = Math.min(Math.max(settings.swirlingMotion, 0.0), 0.5);
+      const damping = 0.913;
+      const densityDissipation = waterSettings.rippleDecay;
+      // small simulation: dissipation on velocity
+      for (let i = 0; i < velocity.length; i++) velocity[i] *= (1 - waterSettings.motionDecay);
 
-      // Apply velocity dissipation
-      for (let i = 0; i < resolution * resolution * 2; i++) {
-        velocity[i] *= 1.0 - velocityDissipation;
-      }
-
-      // Calculate vorticity with proper edge handling
-      for (let i = 1; i < resolution - 1; i++) {
-        for (let j = 1; j < resolution - 1; j++) {
-          const index = i * resolution + j;
-          const left = velocity[(index - 1) * 2 + 1];
-          const right = velocity[(index + 1) * 2 + 1];
-          const bottom = velocity[(index - resolution) * 2];
-          const top = velocity[(index + resolution) * 2];
-          vorticity[index] = (right - left - (top - bottom)) * 0.5;
+      // laplacian-like update for height
+      for (let y = 1; y < resolution - 1; y++) {
+        for (let x = 1; x < resolution - 1; x++) {
+          const idx = y * resolution + x;
+          const top = previous[idx - resolution];
+          const bottom = previous[idx + resolution];
+          const left = previous[idx - 1];
+          const right = previous[idx + 1];
+          let val = (top + bottom + left + right) / 2 - current[idx];
+          val = val * damping + previous[idx] * (1 - damping);
+          // clamp
+          current[idx] = Math.max(-2.0, Math.min(2.0, val * (1 - densityDissipation * 0.01)));
         }
       }
 
-      // Apply vorticity forces
-      if (vorticityInfluence > 0.001) {
-        for (let i = 1; i < resolution - 1; i++) {
-          for (let j = 1; j < resolution - 1; j++) {
-            const index = i * resolution + j;
-            const velIndex = index * 2;
-            const left = Math.abs(vorticity[index - 1]);
-            const right = Math.abs(vorticity[index + 1]);
-            const bottom = Math.abs(vorticity[index - resolution]);
-            const top = Math.abs(vorticity[index + resolution]);
-            const gradX = (right - left) * 0.5;
-            const gradY = (top - bottom) * 0.5;
-            const length = Math.sqrt(gradX * gradX + gradY * gradY) + 1e-5;
-            const safeVorticity = Math.max(-1.0, Math.min(1.0, vorticity[index]));
-            const forceX = (gradY / length) * safeVorticity * vorticityInfluence * 0.1;
-            const forceY = (-gradX / length) * safeVorticity * vorticityInfluence * 0.1;
-            velocity[velIndex] += Math.max(-0.1, Math.min(0.1, forceX));
-            velocity[velIndex + 1] += Math.max(-0.1, Math.min(0.1, forceY));
-          }
-        }
-      }
-
-      // Water simulation with proper edge boundaries (no wrapping)
-      for (let i = 1; i < resolution - 1; i++) {
-        for (let j = 1; j < resolution - 1; j++) {
-          const index = i * resolution + j;
-          const velIndex = index * 2;
-          const top = previous[index - resolution];
-          const bottom = previous[index + resolution];
-          const left = previous[index - 1];
-          const right = previous[index + 1];
-          current[index] = (top + bottom + left + right) / 2 - current[index];
-          current[index] = current[index] * damping + previous[index] * (1 - damping);
-          current[index] += (0 - previous[index]) * safeTension;
-          const velMagnitude = Math.sqrt(
-            velocity[velIndex] * velocity[velIndex] + velocity[velIndex + 1] * velocity[velIndex + 1]
-          );
-          const safeVelInfluence = Math.min(velMagnitude * settings.waveHeight, 0.1);
-          current[index] += safeVelInfluence;
-          current[index] *= 1.0 - densityDissipation * 0.01;
-          current[index] = Math.max(-2.0, Math.min(2.0, current[index]));
-        }
-      }
-
-      // Apply zero boundary conditions to prevent edge wrapping
+      // boundary zero
       for (let i = 0; i < resolution; i++) {
-        // Top and bottom edges
         current[i] = 0;
         current[(resolution - 1) * resolution + i] = 0;
-        velocity[i * 2] = 0;
-        velocity[i * 2 + 1] = 0;
-        velocity[((resolution - 1) * resolution + i) * 2] = 0;
-        velocity[((resolution - 1) * resolution + i) * 2 + 1] = 0;
-        // Left and right edges
         current[i * resolution] = 0;
         current[i * resolution + (resolution - 1)] = 0;
-        velocity[i * resolution * 2] = 0;
-        velocity[i * resolution * 2 + 1] = 0;
-        velocity[(i * resolution + (resolution - 1)) * 2] = 0;
-        velocity[(i * resolution + (resolution - 1)) * 2 + 1] = 0;
       }
 
-      [waterBuffers.current, waterBuffers.previous] = [waterBuffers.previous, waterBuffers.current];
+      // swap buffers
+      const tmp = waterBuffers.previous;
+      waterBuffers.previous = waterBuffers.current;
+      waterBuffers.current = tmp;
+      // update texture
       waterTexture.image.data = waterBuffers.current;
       waterTexture.needsUpdate = true;
     }
 
-    // --- Ripple injection ---
-    function addRipple(x, y, strength = 1.0) {
-      const { resolution, rippleRadius } = waterSettings;
-      const normalizedX = x / window.innerWidth;
-      const normalizedY = 1.0 - y / window.innerHeight;
+    // --- Ripple injection (uses canvas rect so coordinates match) ---
+    function addRipple(clientX, clientY, strength = 1.0) {
+      const rect = renderer.domElement.getBoundingClientRect();
+      const x = clientX - rect.left;
+      const y = clientY - rect.top;
+      const normalizedX = x / rect.width;
+      const normalizedY = 1.0 - y / rect.height;
       const texX = Math.floor(normalizedX * resolution);
       const texY = Math.floor(normalizedY * resolution);
-      const radius = Math.max(rippleRadius, Math.floor(settings.rippleSize * resolution));
-      const rippleStrength = strength * (settings.impactForce / 100000);
-      const radiusSquared = radius * radius;
+      const radius = Math.max(1, Math.floor(waterSettings.rippleRadius));
+      const radiusSq = radius * radius;
+      const rippleStrength = strength;
       for (let i = -radius; i <= radius; i++) {
         for (let j = -radius; j <= radius; j++) {
-          const distanceSquared = i * i + j * j;
-          if (distanceSquared <= radiusSquared) {
-            const posX = texX + i;
-            const posY = texY + j;
-            if (posX >= 0 && posX < resolution && posY >= 0 && posY < resolution) {
-              const index = posY * resolution + posX;
-              const velIndex = index * 2;
-              const distance = Math.sqrt(distanceSquared);
+          const dsq = i * i + j * j;
+          if (dsq <= radiusSq) {
+            const px = texX + i;
+            const py = texY + j;
+            if (px >= 0 && px < resolution && py >= 0 && py < resolution) {
+              const idx = py * resolution + px;
+              const distance = Math.sqrt(dsq);
               const falloff = 1.0 - distance / radius;
-              const rippleValue =
-                Math.cos((distance / radius) * Math.PI * 0.5) * rippleStrength * falloff;
-              waterBuffers.previous[index] += rippleValue;
+              const value = Math.cos((distance / radius) * Math.PI * 0.5) * rippleStrength * falloff;
+              waterBuffers.previous[idx] += value;
+              const velIdx = idx * 2;
               const angle = Math.atan2(j, i);
-              const velocityStrength = rippleValue * settings.spiralIntensity;
-              waterBuffers.velocity[velIndex] += Math.cos(angle) * velocityStrength;
-              waterBuffers.velocity[velIndex + 1] += Math.sin(angle) * velocityStrength;
-              const swirlAngle = angle + Math.PI * 0.5;
-              const swirlStrength = Math.min(velocityStrength * 0.3, 0.1);
-              waterBuffers.velocity[velIndex] += Math.cos(swirlAngle) * swirlStrength;
-              waterBuffers.velocity[velIndex + 1] += Math.sin(swirlAngle) * swirlStrength;
+              const vstrength = value * waterSettings.spiralIntensity;
+              waterBuffers.velocity[velIdx] += Math.cos(angle) * vstrength;
+              waterBuffers.velocity[velIdx + 1] += Math.sin(angle) * vstrength;
             }
           }
         }
       }
-    }
-
-    // --- Tweakpane GUI ---
-    const pane = new Pane({ title: "Audio-Reactive Water Shader" });
-    paneRef.current = pane;
-
-    function togglePanel() {
-      panelVisible = !panelVisible;
-      const paneElement = document.querySelector(".tp-dfwv");
-      const helpHint = helpHintRef.current;
-      if (paneElement && helpHint) {
-        if (panelVisible) {
-          paneElement.classList.add("visible");
-          helpHint.classList.add("hidden");
-        } else {
-          paneElement.classList.remove("visible");
-          helpHint.classList.remove("hidden");
-        }
-      }
-    }
-
-    // hotkey
-    function onKeyDown(e) {
-      if (e.key && e.key.toLowerCase() === "h") togglePanel();
-    }
-    window.addEventListener("keydown", onKeyDown);
-
-    const presetBinding = pane.addBinding(settings, "preset", {
-      options: Object.keys(colorPresets).reduce((acc, key) => {
-        acc[key] = key;
-        return acc;
-      }, {})
-    });
-    presetBinding.on("change", (ev) => {
-      const preset = colorPresets[ev.value];
-      material.uniforms.u_color1.value.fromArray(preset.color1);
-      material.uniforms.u_color2.value.fromArray(preset.color2);
-      material.uniforms.u_color3.value.fromArray(preset.color3);
-      material.uniforms.u_background.value.fromArray(preset.background);
-      const isMonochrome = ev.value === "Pure Monochrome";
-      material.uniforms.u_isMonochrome.value = isMonochrome;
-    });
-
-    const animFolder = pane.addFolder({ title: "Animation" });
-    animFolder
-      .addBinding(settings, "animationSpeed", { min: 0.1, max: 3.0, step: 0.1 })
-      .on("change", (ev) => (material.uniforms.u_speed.value = ev.value));
-
-    const audioFolder = pane.addFolder({ title: "Audio Reactive Settings" });
-
-    // Add live audio level monitors
-    bassMonitor = audioFolder.addBinding(audioLevels, "bassLevel", {
-      readonly: true,
-      min: 0,
-      max: 1,
-      label: "Bass Level"
-    });
-    midMonitor = audioFolder.addBinding(audioLevels, "midLevel", {
-      readonly: true,
-      min: 0,
-      max: 1,
-      label: "Mid Level"
-    });
-    trebleMonitor = audioFolder.addBinding(audioLevels, "trebleLevel", {
-      readonly: true,
-      min: 0,
-      max: 1,
-      label: "Treble Level"
-    });
-    overallMonitor = audioFolder.addBinding(audioLevels, "overallLevel", {
-      readonly: true,
-      min: 0,
-      max: 1,
-      label: "Overall Level"
-    });
-
-    audioFolder
-      .addBinding(settings, "audioReactivity", { min: 0.0, max: 3.0, step: 0.1 })
-      .on("change", (ev) => (material.uniforms.u_audioReactivity.value = ev.value));
-
-    audioFolder
-      .addBinding(settings, "bassResponse", { min: 0.0, max: 3.0, step: 0.1 })
-      .on("change", (ev) => console.log("Bass response changed to:", ev.value));
-    audioFolder
-      .addBinding(settings, "midResponse", { min: 0.0, max: 3.0, step: 0.1 })
-      .on("change", (ev) => console.log("Mid response changed to:", ev.value));
-    audioFolder
-      .addBinding(settings, "trebleResponse", { min: 0.0, max: 3.0, step: 0.1 })
-      .on("change", (ev) => console.log("Treble response changed to:", ev.value));
-
-    const waterFolder = pane.addFolder({ title: "Water Settings" });
-    waterFolder
-      .addBinding(settings, "waterStrength", { min: 0.0, max: 1.0, step: 0.05 })
-      .on("change", (ev) => {
-        material.uniforms.u_waterStrength.value = ev.value;
-        waterSettings.rippleStrength = ev.value;
-      });
-    waterFolder
-      .addBinding(settings, "rippleStrength", { min: 0.0, max: 1.0, step: 0.05 })
-      .on("change", (ev) => (material.uniforms.u_ripple_strength.value = ev.value));
-    waterFolder
-      .addBinding(settings, "mouseIntensity", { min: 0.1, max: 3.0, step: 0.1 })
-      .on("change", (ev) => (waterSettings.mouseIntensity = ev.value));
-    waterFolder
-      .addBinding(settings, "clickIntensity", { min: 0.5, max: 6.0, step: 0.1 })
-      .on("change", (ev) => (waterSettings.clickIntensity = ev.value));
-
-    const textFolder = pane.addFolder({ title: "Text Display" });
-    textFolder.addBinding(settings, "showText").on("change", (ev) => (material.uniforms.u_showText.value = ev.value));
-
-    const audioControlFolder = pane.addFolder({ title: "Audio" });
-    audioControlFolder
-      .addBinding(settings, "audioVolume", { min: 0.0, max: 1.0, step: 0.1 })
-      .on("change", (ev) => (audio.volume = ev.value));
-
-    // --- Mouse / Touch interactions (no-click required for hover ripples) ---
-    let lastMousePosition = { x: 0, y: 0 };
-    let mouseThrottleTime = 0;
-
-    function onMouseMove(event) {
-      const rect = renderer.domElement.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      const now = performance.now();
-      if (now - mouseThrottleTime < 8) return;
-      mouseThrottleTime = now;
-      const dx = x - lastMousePosition.x;
-      const dy = y - lastMousePosition.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      const velocity = distance / 8;
-      if (distance > 1) {
-        const velocityInfluence = Math.min(velocity / 10, 2.0);
-        const baseIntensity = Math.min(distance / 20, 1.0);
-        const fluidIntensity = baseIntensity * velocityInfluence * waterSettings.mouseIntensity;
-        const variation = Math.random() * 0.3 + 0.7;
-        const finalIntensity = fluidIntensity * variation;
-        const jitterX = x + (Math.random() - 0.5) * 3;
-        const jitterY = y + (Math.random() - 0.5) * 3;
-        addRipple(jitterX, jitterY, finalIntensity);
-        lastMousePosition.x = x;
-        lastMousePosition.y = y;
-      }
-    }
-
-    function onMouseClick(event) {
-      const rect = renderer.domElement.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      const y = event.clientY - rect.top;
-      addRipple(x, y, waterSettings.clickIntensity);
-      const clickX = x / window.innerWidth;
-      const clickY = 1.0 - y / window.innerHeight;
+      // set ripple uniform for visual rings in shader
+      const clickX = x / rect.width;
+      const clickY = 1.0 - y / rect.height;
       material.uniforms.u_ripple_position.value.set(clickX, clickY);
       material.uniforms.u_ripple_time.value = clock.getElapsedTime();
     }
 
-    function onTouchMove(event) {
-      event.preventDefault();
+    // --- Pointer / touch handlers attached to canvas (not window) ---
+    let lastPos = { x: 0, y: 0 };
+    let lastThrottle = 0;
+    function onPointerMove(e) {
       const rect = renderer.domElement.getBoundingClientRect();
-      const touch = event.touches[0];
-      const x = touch.clientX - rect.left;
-      const y = touch.clientY - rect.top;
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
       const now = performance.now();
-      if (now - mouseThrottleTime < 8) return;
-      mouseThrottleTime = now;
-      const dx = x - lastMousePosition.x;
-      const dy = y - lastMousePosition.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      const velocity = distance / 8;
-      if (distance > 1) {
-        const velocityInfluence = Math.min(velocity / 10, 2.0);
-        const baseIntensity = Math.min(distance / 20, 1.0);
-        const fluidIntensity = baseIntensity * velocityInfluence * waterSettings.mouseIntensity;
-        const variation = Math.random() * 0.3 + 0.7;
-        const finalIntensity = fluidIntensity * variation;
-        const jitterX = x + (Math.random() - 0.5) * 3;
-        const jitterY = y + (Math.random() - 0.5) * 3;
-        addRipple(jitterX, jitterY, finalIntensity);
-        lastMousePosition.x = x;
-        lastMousePosition.y = y;
+      if (!lastPos.x && !lastPos.y) { lastPos = { x, y }; }
+      if (now - lastThrottle < 8) return;
+      lastThrottle = now;
+      const dx = x - lastPos.x, dy = y - lastPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist > 1) {
+        const velocityInfluence = Math.min(dist / 80, 2.0);
+        const intensity = Math.min(dist / 20, 1.0) * velocityInfluence;
+        addRipple(e.clientX, e.clientY, intensity);
+        lastPos.x = x; lastPos.y = y;
       }
     }
 
-    function onTouchStart(event) {
-      event.preventDefault();
-      const rect = renderer.domElement.getBoundingClientRect();
-      const touch = event.touches[0];
-      const x = touch.clientX - rect.left;
-      const y = touch.clientY - rect.top;
-      addRipple(x, y, waterSettings.clickIntensity);
-      const clickX = x / window.innerWidth;
-      const clickY = 1.0 - y / window.innerHeight;
-      material.uniforms.u_ripple_position.value.set(clickX, clickY);
-      material.uniforms.u_ripple_time.value = clock.getElapsedTime();
+    function onClick(e) {
+      addRipple(e.clientX, e.clientY, 3.0);
     }
 
-    window.addEventListener("mousemove", onMouseMove);
-    window.addEventListener("click", onMouseClick);
-    window.addEventListener("touchmove", onTouchMove, { passive: false });
-    window.addEventListener("touchstart", onTouchStart, { passive: false });
+    function onTouchMove(e) {
+      if (!e.touches || e.touches.length === 0) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      onPointerMove(t);
+    }
+    function onTouchStart(e) {
+      if (!e.touches || e.touches.length === 0) return;
+      e.preventDefault();
+      const t = e.touches[0];
+      addRipple(t.clientX, t.clientY, 3.0);
+    }
 
-    // --- Clock & animation loop ---
+    renderer.domElement.addEventListener("pointermove", onPointerMove);
+    renderer.domElement.addEventListener("click", onClick);
+    renderer.domElement.addEventListener("touchmove", onTouchMove, { passive: false });
+    renderer.domElement.addEventListener("touchstart", onTouchStart, { passive: false });
+
+    // --- Animation loop ---
     const clock = new THREE.Clock();
     let rafId = null;
-
     function animate() {
       rafId = requestAnimationFrame(animate);
-      const elapsed = clock.getElapsedTime();
-      material.uniforms.u_time.value = elapsed;
+      const t = clock.getElapsedTime();
+      material.uniforms.u_time.value = t;
       updateAudioAnalysis();
       updateWaterSimulation();
       renderer.render(scene, camera);
     }
+    animate();
 
-    // --- Audio button behaviour (use ref) ---
+    // --- Play/pause button ---
     function audioBtnHandler() {
       if (!isPlaying) {
-        initAudioAnalysis();
-        audio
-          .play()
-          .then(() => {
-            isPlaying = true;
-            if (audioBtnRef.current) audioBtnRef.current.textContent = "[ stop ]";
-            console.log("Audio started, analyser available:", !!analyser);
-          })
-          .catch((e) => {
-            console.log("Audio play failed:", e);
-            if (audioBtnRef.current) audioBtnRef.current.textContent = "[ audio failed ]";
-          });
+        initAudioAnalysis().catch(() => {});
+        audio.play().then(() => {
+          isPlaying = true;
+          if (audioBtnRef.current) audioBtnRef.current.textContent = "[ stop ]";
+        }).catch((e) => {
+          console.warn("Play failed:", e);
+          if (audioBtnRef.current) audioBtnRef.current.textContent = "[ play (failed) ]";
+        });
       } else {
         audio.pause();
         audio.currentTime = 0;
         isPlaying = false;
         if (audioBtnRef.current) audioBtnRef.current.textContent = "[ play ]";
-        console.log("Audio stopped");
       }
     }
+    if (audioBtnRef.current) audioBtnRef.current.addEventListener("click", audioBtnHandler);
 
-    if (audioBtnRef.current) {
-      audioBtnRef.current.addEventListener("click", audioBtnHandler);
+    // --- Resize handling (use container size) ---
+    function handleResize() {
+      setSizeToContainer();
     }
+    window.addEventListener("resize", handleResize);
 
-    // --- Resize handling ---
-    function onWindowResize() {
-      const width = window.innerWidth;
-      const height = window.innerHeight;
-      renderer.setSize(width, height);
-      material.uniforms.u_resolution.value.set(width, height);
-      setupTextTexture();
-    }
-    window.addEventListener("resize", onWindowResize);
+    // expose initial visuals
+    material.uniforms.u_color1.value.set(1.0, 1.0, 1.0);
+    material.uniforms.u_color2.value.set(0.9, 0.95, 1.0);
+    material.uniforms.u_color3.value.set(0.8, 0.9, 1.0);
+    material.uniforms.u_background.value.set(0.02, 0.02, 0.05);
 
-    // --- Start stuff ---
-    setupTextTexture();
-    animate();
-
-    const initialPreset = colorPresets[settings.preset];
-    material.uniforms.u_color1.value.fromArray(initialPreset.color1);
-    material.uniforms.u_color2.value.fromArray(initialPreset.color2);
-    material.uniforms.u_color3.value.fromArray(initialPreset.color3);
-    material.uniforms.u_background.value.fromArray(initialPreset.background);
-    material.uniforms.u_ripple_strength.value = settings.rippleStrength;
-    material.uniforms.u_waterStrength.value = settings.waterStrength;
-    material.uniforms.u_speed.value = settings.animationSpeed;
-    material.uniforms.u_audioReactivity.value = settings.audioReactivity;
-    material.uniforms.u_isMonochrome.value = false;
+    // initial splash ripple
     setTimeout(() => {
-      addRipple(window.innerWidth / 2, window.innerHeight / 2, 1.5);
-    }, 500);
+      const rect = renderer.domElement.getBoundingClientRect();
+      addRipple(rect.width / 2, rect.height / 2, 1.3);
+    }, 350);
 
     // --- Cleanup on unmount ---
     return () => {
       // stop animation
       if (rafId) cancelAnimationFrame(rafId);
-      // remove event listeners
-      window.removeEventListener("resize", onWindowResize);
-      window.removeEventListener("mousemove", onMouseMove);
-      window.removeEventListener("click", onMouseClick);
-      window.removeEventListener("touchmove", onTouchMove);
-      window.removeEventListener("touchstart", onTouchStart);
-      window.removeEventListener("keydown", onKeyDown);
-      // audio button
+      // remove listeners
+      window.removeEventListener("resize", handleResize);
+      renderer.domElement.removeEventListener("pointermove", onPointerMove);
+      renderer.domElement.removeEventListener("click", onClick);
+      renderer.domElement.removeEventListener("touchmove", onTouchMove);
+      renderer.domElement.removeEventListener("touchstart", onTouchStart);
       if (audioBtnRef.current) audioBtnRef.current.removeEventListener("click", audioBtnHandler);
-      // dispose pane
-      try {
-        if (paneRef.current) paneRef.current.dispose();
-      } catch (e) {
-        // ignore
-      }
       // stop audio
-      try {
-        audio.pause();
-        audio.src = "";
-      } catch (e) {}
-      // remove renderer DOM
-      try {
-        containerRef.current && containerRef.current.removeChild(renderer.domElement);
-      } catch (e) {}
-      // dispose WebGL resources
-      geometry.dispose();
-      material.dispose();
-      waterTexture.dispose();
-      // If u_textTexture was set, dispose it
-      if (material.uniforms.u_textTexture.value) {
-        try {
-          material.uniforms.u_textTexture.value.dispose();
-        } catch (e) {}
-      }
-      renderer.dispose();
+      try { audio.pause(); audio.src = ""; } catch (e) {}
+      // remove DOM
+      try { if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement); } catch (e) {}
+      // dispose resources
+      try { geometry.dispose(); material.dispose(); waterTexture.dispose(); renderer.dispose(); } catch (e) {}
+      // disconnect audio
+      try { if (sourceNode) sourceNode.disconnect(); if (analyser) analyser.disconnect(); if (audioContext) audioContext.close(); } catch (e) {}
     };
-  }, []);
+  }, []); // run once
 
-  // Small CSS + font-face injection inside component so it's easier to drop-in
-  // (Tailwind handles layout; this adds fonts & small rules used by the original)
+  // container is fixed to viewport so the canvas fills it
   return (
-    <div className="w-screen h-screen bg-black relative overflow-hidden select-none">
-      <style>{`
-        @font-face {
-          font-family: "GT Standard";
-          src: url("https://assets.codepen.io/7558/GT-Standard-VF-Trial.woff2") format("woff2-variations");
-          font-weight: 300 900;
-          font-stretch: 0% 150%;
-          font-style: normal;
-          font-display: swap;
-        }
-        @font-face {
-          font-family: "PPSupplyMono";
-          src: url("https://assets.codepen.io/7558/PPSupplyMono-Regular.ttf") format("truetype");
-          font-weight: normal;
-          font-style: normal;
-          font-display: swap;
-        }
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body, #root { height: 100%; }
-        .tp-dfwv { position: fixed !important; top: 20px !important; right: 20px !important; z-index: 1000 !important; display: none !important; transition: opacity 0.3s ease !important; }
-        .tp-dfwv.visible { display: block !important; }
-        .help-hint.hidden { opacity: 0 !important; pointer-events: none; }
-      `}</style>
-
-      {/* WebGL container */}
-      <div ref={containerRef} id="container" className="w-full h-full" />
-
-      {/* Controls */}
-      <div id="controls" className="absolute top-5 left-5 z-50 opacity-30 hover:opacity-100 transition-opacity">
-        <button
-          ref={audioBtnRef}
-          id="audioBtn"
-          className="text-white bg-transparent border-none cursor-pointer font-mono text-xs uppercase"
-        >
+    <div style={{ width: "100vw", height: "100vh", position: "fixed", inset: 0, margin: 0, padding: 0, overflow: "hidden", background: "#000" }}>
+      <div ref={containerRef} style={{ width: "50%", height: "50%" }} />
+      <div style={{ position: "absolute", top: 12, left: 12, zIndex: 50 }}>
+        <button ref={audioBtnRef} style={{ color: "#fff", background: "transparent", border: "1px solid rgba(255,255,255,0.15)", padding: "6px 8px", fontFamily: "monospace" }}>
           [ play ]
         </button>
-      </div>
-
-      {/* Help hint */}
-      <div
-        className="help-hint absolute top-5 right-5 text-white text-xs uppercase opacity-50 z-50 transition-opacity"
-        id="helpHint"
-        ref={helpHintRef}
-      >
-        Press 'H' for controls
-      </div>
-
-      {/* Info / credits */}
-      <div className="info absolute bottom-5 left-1/2 -translate-x-1/2 text-white text-xs uppercase z-50 opacity-80 text-center">
-        <div>Move mouse to create audio-reactive fluid ripples</div>
-        <div className="credit mt-1 opacity-60 text-[11px]">Music by me • Shader inspiration by <a className="underline" href="https://x.com/XorDev" target="_blank" rel="noreferrer">XOR</a></div>
       </div>
     </div>
   );
