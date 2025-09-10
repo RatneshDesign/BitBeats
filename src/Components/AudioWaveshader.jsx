@@ -1,97 +1,204 @@
 // src/AudioWaterShader.jsx
-import React, { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
+import LightBlocksBackground from "./LightBlockBackground";
+import Aurora from "./aurora";
 
 export default function AudioWaterShader() {
   const containerRef = useRef(null);
-  const audioBtnRef = useRef(null);
+  const audioRef = useRef(null);
 
+  useEffect(() => {
+    const audio = new Audio('/song.mp3');
+    audio.crossOrigin = "anonymous";
+    audioRef.current = audio;
+
+    const onLoaded = () => setDuration(audio.duration || 0);
+    const onTime = () => {
+      setCurrentTime(audio.currentTime || 0);
+      setProgress(audio.duration ? (audio.currentTime / audio.duration) * 100 : 0);
+    };
+
+    audio.addEventListener("loadedmetadata", onLoaded);
+    audio.addEventListener("timeupdate", onTime);
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", onLoaded);
+      audio.removeEventListener("timeupdate", onTime);
+      try { audio.pause(); audio.src = ""; } catch (e) { }
+    };
+  }, []);
+
+
+
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const dataArrayRef = useRef(null);
+  const sourceNodeRef = useRef(null);
+  const playingRef = useRef(false);
+
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [progress, setProgress] = useState(0);
+
+  // format time helper
+  const formatTime = (sec) => {
+    if (!sec || isNaN(sec)) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
+
+  // ---------- AUDIO: setup listeners for UI (timeupdate / loadedmetadata)
+  useEffect(() => {
+    const audio = audioRef.current;
+    audio.crossOrigin = "anonymous";
+    const onLoaded = () => setDuration(audio.duration || 0);
+    const onTime = () => {
+      setCurrentTime(audio.currentTime || 0);
+      setProgress(
+        audio.duration ? (audio.currentTime / audio.duration) * 100 : 0
+      );
+    };
+
+    audio.addEventListener("loadedmetadata", onLoaded);
+    audio.addEventListener("timeupdate", onTime);
+
+    return () => {
+      audio.removeEventListener("loadedmetadata", onLoaded);
+      audio.removeEventListener("timeupdate", onTime);
+      try {
+        audio.pause();
+        audio.src = "";
+      } catch (e) { }
+    };
+  }, []);
+
+  // Play/pause (React handler)
+  const togglePlay = async () => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    if (!playingRef.current) {
+      // initialize audio analysis on first play
+      if (!audioCtxRef.current) {
+        try {
+          const ctx = new (window.AudioContext || window.webkitAudioContext)();
+          await ctx.resume();
+          audioCtxRef.current = ctx;
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 256;
+          analyser.smoothingTimeConstant = 0.8;
+          analyserRef.current = analyser;
+          dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+          sourceNodeRef.current = ctx.createMediaElementSource(audio);
+          sourceNodeRef.current.connect(analyser);
+          analyser.connect(ctx.destination);
+        } catch (e) {
+          console.warn("AudioContext init failed:", e);
+        }
+      }
+
+      try {
+        await audio.play();
+        playingRef.current = true;
+        setIsPlaying(true);
+      } catch (e) {
+        console.warn("Audio play failed:", e);
+      }
+    } else {
+      audio.pause();
+      playingRef.current = false;
+      setIsPlaying(false);
+    }
+  };
+
+  // Seek handler (click on progress bar)
+  const progressBarRef = useRef(null);
+  const isDraggingRef = useRef(false);
+
+  const updateSeek = (clientX) => {
+    const audio = audioRef.current;
+    if (!audio || !audio.duration) return;
+
+    const rect = progressBarRef.current.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    audio.currentTime = pct * audio.duration;
+    setProgress(pct * 100);
+    setCurrentTime(audio.currentTime);
+  };
+
+  const startDrag = (e) => {
+    e.preventDefault();
+    isDraggingRef.current = true;
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    updateSeek(clientX);
+
+    window.addEventListener("mousemove", onDrag);
+    window.addEventListener("mouseup", stopDrag);
+    window.addEventListener("touchmove", onDrag, { passive: false });
+    window.addEventListener("touchend", stopDrag);
+  };
+
+  const onDrag = (e) => {
+    if (!isDraggingRef.current) return;
+    e.preventDefault();
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+    updateSeek(clientX);
+  };
+
+  const stopDrag = (e) => {
+    isDraggingRef.current = false;
+    window.removeEventListener("mousemove", onDrag);
+    window.removeEventListener("mouseup", stopDrag);
+    window.removeEventListener("touchmove", onDrag);
+    window.removeEventListener("touchend", stopDrag);
+  };
+
+
+  // ---------- THREE.JS effect (canvas, shader, simulation)
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    // --- Renderer & scene (append ONLY to the container) ---
+    // Clear existing children (solves the double-canvas / HMR problem)
+    while (container.firstChild) container.removeChild(container.firstChild);
+
+    // scene + full-screen quad uses orthographic camera (plane shader)
     const scene = new THREE.Scene();
-    // full-screen quad uses an orthographic camera
     const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
     camera.position.z = 1;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
-    // ensure no second canvas by cleaning any existing children (helps HMR/dev)
-    while (container.firstChild) container.removeChild(container.firstChild);
-
-    // style canvas to fill the container
+    renderer.setClearColor(0x000000, 0); // remove black background
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
     renderer.domElement.style.display = "block";
-    renderer.domElement.style.touchAction = "none"; // better touch behavior
+    renderer.domElement.style.touchAction = "none";
     container.appendChild(renderer.domElement);
 
-    // Helper to size renderer to container
-    
 
-    // --- Audio setup ---
-    let isPlaying = false;
-    let audioContext = null;
-    let analyser = null;
-    let dataArray = null;
-    let sourceNode = null;
-
-    const audio = new Audio();
-    audio.src = "https://assets.codepen.io/7558/xor-is-epic-1446.mp3";
-    audio.preload = "auto";
-    audio.volume = 1.0;
-    audio.crossOrigin = "anonymous";
-    audio.addEventListener("ended", () => {
-      if (isPlaying) {
-        audio.currentTime = 0;
-        audio.play();
-      }
-    });
-    audio.load();
-
-    async function initAudioAnalysis() {
-      if (!audioContext) {
-        audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        // resume ensures the context works after user gesture
-        try { await audioContext.resume(); } catch (e) { /* ignore */ }
-        analyser = audioContext.createAnalyser();
-        analyser.fftSize = 256;
-        analyser.smoothingTimeConstant = 0.8;
-        dataArray = new Uint8Array(analyser.frequencyBinCount);
-        sourceNode = audioContext.createMediaElementSource(audio);
-        sourceNode.connect(analyser);
-        analyser.connect(audioContext.destination);
+    // Put canvas sizing logic in one place
+    function setSizeToContainer() {
+      const width = container.clientWidth || window.innerWidth;
+      const height = container.clientHeight || window.innerHeight;
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setSize(width, height, false);
+      if (material && material.uniforms && material.uniforms.u_resolution) {
+        material.uniforms.u_resolution.value.set(width, height);
       }
     }
 
-    // --- Water simulation buffers & settings (kept similar to your original) ---
-    const waterSettings = {
-      resolution: 256,
-      rippleRadius: 8,
-      spiralIntensity: 0.2,
-      waveHeight: 0.01,
-      motionDecay: 0.08,
-      rippleDecay: 1.0
-    };
-
-    const resolution = waterSettings.resolution;
+    // --- Water buffers (same idea as your port) ---
+    const resolution = 256;
     const waterBuffers = {
       current: new Float32Array(resolution * resolution),
       previous: new Float32Array(resolution * resolution),
       velocity: new Float32Array(resolution * resolution * 2),
       vorticity: new Float32Array(resolution * resolution)
     };
-    // zero initialize (already zero but explicit)
-    for (let i = 0; i < resolution * resolution; i++) {
-      waterBuffers.current[i] = 0;
-      waterBuffers.previous[i] = 0;
-      waterBuffers.vorticity[i] = 0;
-      waterBuffers.velocity[i * 2] = 0;
-      waterBuffers.velocity[i * 2 + 1] = 0;
-    }
 
-    // DataTexture (FloatType - common in modern browsers). Keep an eye if you need WebGL2.
     const waterTexture = new THREE.DataTexture(
       waterBuffers.current,
       resolution,
@@ -103,7 +210,7 @@ export default function AudioWaterShader() {
     waterTexture.magFilter = THREE.LinearFilter;
     waterTexture.needsUpdate = true;
 
-    // --- Shaders (kept from your version, trimmed text parts removed) ---
+    // --- shaders (kept similar to yours) ---
     const vertexShader = `
       varying vec2 vUv;
       void main() {
@@ -175,17 +282,22 @@ export default function AudioWaterShader() {
           o.a = inCircle;
         }
         vec3 finalColor = mix(u_background, o.rgb, o.a);
-        gl_FragColor = vec4(finalColor, 1.0);
+        gl_FragColor = vec4(finalColor, o.a);
       }
     `;
 
-    // --- Material & geometry ---
+    // --- material & geometry
     const material = new THREE.ShaderMaterial({
       vertexShader,
       fragmentShader,
       uniforms: {
         u_time: { value: 0.0 },
-        u_resolution: { value: new THREE.Vector2(container.clientWidth || window.innerWidth, container.clientHeight || window.innerHeight) },
+        u_resolution: {
+          value: new THREE.Vector2(
+            container.clientWidth || window.innerWidth,
+            container.clientHeight || window.innerHeight
+          )
+        },
         u_speed: { value: 1.3 },
         u_color1: { value: new THREE.Vector3(1.0, 1.0, 1.0) },
         u_color2: { value: new THREE.Vector3(0.9, 0.95, 1.0) },
@@ -204,68 +316,33 @@ export default function AudioWaterShader() {
       }
     });
 
-
-    function setSizeToContainer() {
-      const width = container.clientWidth || window.innerWidth;
-      const height = container.clientHeight || window.innerHeight;
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-      renderer.setSize(width, height, false);
-      if (material && material.uniforms && material.uniforms.u_resolution) {
-        material.uniforms.u_resolution.value.set(width, height);
-      }
-    }
-    setSizeToContainer();
-
     const geometry = new THREE.PlaneGeometry(2, 2);
     const quad = new THREE.Mesh(geometry, material);
     scene.add(quad);
 
-    // --- Audio analysis update (update shader uniforms) ---
-    function updateAudioAnalysis() {
-      if (analyser && dataArray && isPlaying) {
-        analyser.getByteFrequencyData(dataArray);
-        const bassEnd = Math.floor(dataArray.length * 0.1);
-        const midEnd = Math.floor(dataArray.length * 0.5);
-        let bass = 0, mid = 0, treble = 0;
-        for (let i = 0; i < bassEnd; i++) bass += dataArray[i];
-        bass = (bass / Math.max(1, bassEnd) / 255);
-        for (let i = bassEnd; i < midEnd; i++) mid += dataArray[i];
-        mid = (mid / Math.max(1, midEnd - bassEnd) / 255);
-        for (let i = midEnd; i < dataArray.length; i++) treble += dataArray[i];
-        treble = (treble / Math.max(1, dataArray.length - midEnd) / 255);
-        const overall = (bass + mid + treble) / 3;
-        const smoothing = 0.8;
-        material.uniforms.u_audioLow.value = material.uniforms.u_audioLow.value * smoothing + bass * (1 - smoothing);
-        material.uniforms.u_audioMid.value = material.uniforms.u_audioMid.value * smoothing + mid * (1 - smoothing);
-        material.uniforms.u_audioHigh.value = material.uniforms.u_audioHigh.value * smoothing + treble * (1 - smoothing);
-        material.uniforms.u_audioOverall.value = material.uniforms.u_audioOverall.value * smoothing + overall * (1 - smoothing);
-      }
-    }
+    // size initially
+    setSizeToContainer();
 
-    // --- Water sim update (simplified but compatible with your code) ---
+    // ----- simulation & ripple functions
     function updateWaterSimulation() {
-      const { current, previous, velocity, vorticity } = waterBuffers;
+      const { current, previous } = waterBuffers;
       const damping = 0.913;
-      const densityDissipation = waterSettings.rippleDecay;
-      // small simulation: dissipation on velocity
-      for (let i = 0; i < velocity.length; i++) velocity[i] *= (1 - waterSettings.motionDecay);
+      const densityDissipation = 1.0;
 
-      // laplacian-like update for height
       for (let y = 1; y < resolution - 1; y++) {
         for (let x = 1; x < resolution - 1; x++) {
-          const idx = y * resolution + x;
-          const top = previous[idx - resolution];
-          const bottom = previous[idx + resolution];
-          const left = previous[idx - 1];
-          const right = previous[idx + 1];
-          let val = (top + bottom + left + right) / 2 - current[idx];
-          val = val * damping + previous[idx] * (1 - damping);
-          // clamp
-          current[idx] = Math.max(-2.0, Math.min(2.0, val * (1 - densityDissipation * 0.01)));
+          const i = y * resolution + x;
+          const top = previous[i - resolution];
+          const bottom = previous[i + resolution];
+          const left = previous[i - 1];
+          const right = previous[i + 1];
+          let v = (top + bottom + left + right) / 2 - current[i];
+          v = v * damping + previous[i] * (1 - damping);
+          current[i] = Math.max(-2.0, Math.min(2.0, v * (1 - densityDissipation * 0.01)));
         }
       }
 
-      // boundary zero
+      // zero boundary
       for (let i = 0; i < resolution; i++) {
         current[i] = 0;
         current[(resolution - 1) * resolution + i] = 0;
@@ -277,81 +354,74 @@ export default function AudioWaterShader() {
       const tmp = waterBuffers.previous;
       waterBuffers.previous = waterBuffers.current;
       waterBuffers.current = tmp;
-      // update texture
+
       waterTexture.image.data = waterBuffers.current;
       waterTexture.needsUpdate = true;
     }
 
-    // --- Ripple injection (uses canvas rect so coordinates match) ---
     function addRipple(clientX, clientY, strength = 1.0) {
       const rect = renderer.domElement.getBoundingClientRect();
       const x = clientX - rect.left;
       const y = clientY - rect.top;
-      const normalizedX = x / rect.width;
-      const normalizedY = 1.0 - y / rect.height;
-      const texX = Math.floor(normalizedX * resolution);
-      const texY = Math.floor(normalizedY * resolution);
-      const radius = Math.max(1, Math.floor(waterSettings.rippleRadius));
-      const radiusSq = radius * radius;
-      const rippleStrength = strength;
+      const nx = x / rect.width;
+      const ny = 1.0 - y / rect.height;
+      const tx = Math.floor(nx * resolution);
+      const ty = Math.floor(ny * resolution);
+      const radius = Math.max(1, Math.floor(8));
+      const r2 = radius * radius;
+
       for (let i = -radius; i <= radius; i++) {
         for (let j = -radius; j <= radius; j++) {
           const dsq = i * i + j * j;
-          if (dsq <= radiusSq) {
-            const px = texX + i;
-            const py = texY + j;
+          if (dsq <= r2) {
+            const px = tx + i;
+            const py = ty + j;
             if (px >= 0 && px < resolution && py >= 0 && py < resolution) {
               const idx = py * resolution + px;
-              const distance = Math.sqrt(dsq);
-              const falloff = 1.0 - distance / radius;
-              const value = Math.cos((distance / radius) * Math.PI * 0.5) * rippleStrength * falloff;
-              waterBuffers.previous[idx] += value;
-              const velIdx = idx * 2;
-              const angle = Math.atan2(j, i);
-              const vstrength = value * waterSettings.spiralIntensity;
-              waterBuffers.velocity[velIdx] += Math.cos(angle) * vstrength;
-              waterBuffers.velocity[velIdx + 1] += Math.sin(angle) * vstrength;
+              const dist = Math.sqrt(dsq);
+              const falloff = 1 - dist / radius;
+              const val = Math.cos((dist / radius) * Math.PI * 0.5) * strength * falloff;
+              waterBuffers.previous[idx] += val;
             }
           }
         }
       }
-      // set ripple uniform for visual rings in shader
+
+      // ripple uniform for shader rings
       const clickX = x / rect.width;
       const clickY = 1.0 - y / rect.height;
       material.uniforms.u_ripple_position.value.set(clickX, clickY);
       material.uniforms.u_ripple_time.value = clock.getElapsedTime();
     }
 
-    // --- Pointer / touch handlers attached to canvas (not window) ---
-    let lastPos = { x: 0, y: 0 };
-    let lastThrottle = 0;
+    // pointer handlers on renderer.domElement (canvas)
+    let last = { x: 0, y: 0 };
+    let throttle = 0;
     function onPointerMove(e) {
       const rect = renderer.domElement.getBoundingClientRect();
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
       const now = performance.now();
-      if (!lastPos.x && !lastPos.y) { lastPos = { x, y }; }
-      if (now - lastThrottle < 8) return;
-      lastThrottle = now;
-      const dx = x - lastPos.x, dy = y - lastPos.y;
+      if (!last.x && !last.y) last = { x, y };
+      if (now - throttle < 8) return;
+      throttle = now;
+      const dx = x - last.x;
+      const dy = y - last.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
       if (dist > 1) {
-        const velocityInfluence = Math.min(dist / 80, 2.0);
-        const intensity = Math.min(dist / 20, 1.0) * velocityInfluence;
+        const intensity = Math.min(dist / 20, 1.0) * Math.min(dist / 80, 2.0);
         addRipple(e.clientX, e.clientY, intensity);
-        lastPos.x = x; lastPos.y = y;
+        last.x = x;
+        last.y = y;
       }
     }
-
     function onClick(e) {
       addRipple(e.clientX, e.clientY, 3.0);
     }
-
     function onTouchMove(e) {
       if (!e.touches || e.touches.length === 0) return;
       e.preventDefault();
-      const t = e.touches[0];
-      onPointerMove(t);
+      onPointerMove(e.touches[0]);
     }
     function onTouchStart(e) {
       if (!e.touches || e.touches.length === 0) return;
@@ -365,88 +435,116 @@ export default function AudioWaterShader() {
     renderer.domElement.addEventListener("touchmove", onTouchMove, { passive: false });
     renderer.domElement.addEventListener("touchstart", onTouchStart, { passive: false });
 
-    // --- Animation loop ---
+    // --- audio analyser update (reads analyserRef)
+    function updateAudioAnalysis() {
+      const analyser = analyserRef.current;
+      const dataArray = dataArrayRef.current;
+      if (!analyser || !dataArray || !playingRef.current) return;
+      analyser.getByteFrequencyData(dataArray);
+      const bassEnd = Math.floor(dataArray.length * 0.1);
+      const midEnd = Math.floor(dataArray.length * 0.5);
+      let bass = 0, mid = 0, treble = 0;
+      for (let i = 0; i < bassEnd; i++) bass += dataArray[i];
+      bass = (bass / Math.max(1, bassEnd) / 255);
+      for (let i = bassEnd; i < midEnd; i++) mid += dataArray[i];
+      mid = (mid / Math.max(1, midEnd - bassEnd) / 255);
+      for (let i = midEnd; i < dataArray.length; i++) treble += dataArray[i];
+      treble = (treble / Math.max(1, dataArray.length - midEnd) / 255);
+      const overall = (bass + mid + treble) / 3;
+      const smoothing = 0.8;
+      material.uniforms.u_audioLow.value = material.uniforms.u_audioLow.value * smoothing + bass * (1 - smoothing);
+      material.uniforms.u_audioMid.value = material.uniforms.u_audioMid.value * smoothing + mid * (1 - smoothing);
+      material.uniforms.u_audioHigh.value = material.uniforms.u_audioHigh.value * smoothing + treble * (1 - smoothing);
+      material.uniforms.u_audioOverall.value = material.uniforms.u_audioOverall.value * smoothing + overall * (1 - smoothing);
+    }
+
+    // ---- animation loop
     const clock = new THREE.Clock();
     let rafId = null;
     function animate() {
       rafId = requestAnimationFrame(animate);
       const t = clock.getElapsedTime();
-      material.uniforms.u_time.value = t;
+      if (material && material.uniforms) material.uniforms.u_time.value = t;
       updateAudioAnalysis();
       updateWaterSimulation();
       renderer.render(scene, camera);
     }
     animate();
 
-    // --- Play/pause button ---
-    function audioBtnHandler() {
-      if (!isPlaying) {
-        initAudioAnalysis().catch(() => {});
-        audio.play().then(() => {
-          isPlaying = true;
-          if (audioBtnRef.current) audioBtnRef.current.textContent = "[ stop ]";
-        }).catch((e) => {
-          console.warn("Play failed:", e);
-          if (audioBtnRef.current) audioBtnRef.current.textContent = "[ play (failed) ]";
-        });
-      } else {
-        audio.pause();
-        audio.currentTime = 0;
-        isPlaying = false;
-        if (audioBtnRef.current) audioBtnRef.current.textContent = "[ play ]";
-      }
-    }
-    if (audioBtnRef.current) audioBtnRef.current.addEventListener("click", audioBtnHandler);
-
-    // --- Resize handling (use container size) ---
+    // resize handling
     function handleResize() {
       setSizeToContainer();
     }
     window.addEventListener("resize", handleResize);
 
-    // expose initial visuals
-    material.uniforms.u_color1.value.set(1.0, 1.0, 1.0);
-    material.uniforms.u_color2.value.set(0.9, 0.95, 1.0);
-    material.uniforms.u_color3.value.set(0.8, 0.9, 1.0);
-    material.uniforms.u_background.value.set(0.02, 0.02, 0.05);
-
-    // initial splash ripple
+    // little initial splash
     setTimeout(() => {
       const rect = renderer.domElement.getBoundingClientRect();
-      addRipple(rect.width / 2, rect.height / 2, 1.3);
-    }, 350);
+      addRipple(rect.width / 2, rect.height / 2, 1.2);
+    }, 300);
 
-    // --- Cleanup on unmount ---
+    // cleanup
     return () => {
-      // stop animation
       if (rafId) cancelAnimationFrame(rafId);
-      // remove listeners
       window.removeEventListener("resize", handleResize);
       renderer.domElement.removeEventListener("pointermove", onPointerMove);
       renderer.domElement.removeEventListener("click", onClick);
       renderer.domElement.removeEventListener("touchmove", onTouchMove);
       renderer.domElement.removeEventListener("touchstart", onTouchStart);
-      if (audioBtnRef.current) audioBtnRef.current.removeEventListener("click", audioBtnHandler);
-      // stop audio
-      try { audio.pause(); audio.src = ""; } catch (e) {}
-      // remove DOM
-      try { if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement); } catch (e) {}
-      // dispose resources
-      try { geometry.dispose(); material.dispose(); waterTexture.dispose(); renderer.dispose(); } catch (e) {}
-      // disconnect audio
-      try { if (sourceNode) sourceNode.disconnect(); if (analyser) analyser.disconnect(); if (audioContext) audioContext.close(); } catch (e) {}
+
+      try {
+        if (container.contains(renderer.domElement)) container.removeChild(renderer.domElement);
+      } catch (e) { }
+      try { geometry.dispose(); material.dispose(); waterTexture.dispose(); renderer.dispose(); } catch (e) { }
+
+      // audio cleanup
+      try {
+        if (sourceNodeRef.current) sourceNodeRef.current.disconnect();
+        if (analyserRef.current) analyserRef.current.disconnect();
+        if (audioCtxRef.current) audioCtxRef.current.close();
+      } catch (e) { }
     };
   }, []); // run once
 
-  // container is fixed to viewport so the canvas fills it
+  // ========== JSX (controls + container)
+  // Change the container size here: style.width and style.height.
+  // Example: full-screen canvas -> style={{ width: "100vw", height: "100vh" }}
+  // Example: centered smaller -> width: "60vw", height: "60vh", margin: "auto"
   return (
-    <div style={{ width: "100vw", height: "100vh", position: "fixed", inset: 0, margin: 0, padding: 0, overflow: "hidden", background: "#000" }}>
-      <div ref={containerRef} style={{ width: "50%", height: "50%" }} />
-      <div style={{ position: "absolute", top: 12, left: 12, zIndex: 50 }}>
-        <button ref={audioBtnRef} style={{ color: "#fff", background: "transparent", border: "1px solid rgba(255,255,255,0.15)", padding: "6px 8px", fontFamily: "monospace" }}>
-          [ play ]
-        </button>
+    <div style={{ width: "100vw", height: "100vh", position: "fixed", inset: 0, margin: 0, padding: 0, overflow: "hidden", background: "transparent" }}>
+      {/* Container: change its width/height to move/scale the shader */}
+{/* 
+      <Aurora
+        colorStops={["#3A29FF", "#FF94B4", "#FF3232"]}
+        blend={0.5}
+        amplitude={1.0}
+        speed={0.5}
+      /> */}
+      <div ref={containerRef} style={{ width: "60%", height: "60%", position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }} />
+
+      <div className="w-full flex items-center gap-3 text-sm text-white/80 font-mono">
+        <span>{formatTime(currentTime)}</span>
+        <button onClick={togglePlay} className="px-3 py-1 border border-white/30 rounded hover:bg-white/10 transition text-white" > {isPlaying ? "⏸️" : "▶️"} </button>
+        <div
+          className="flex-1 h-1 bg-white/30 rounded-full relative cursor-pointer"
+          ref={progressBarRef}
+          onMouseDown={startDrag}
+          onTouchStart={startDrag}
+        >
+          <div
+            className="h-1 bg-white rounded-full"
+            style={{ width: `${progress}%` }}
+          />
+          {/* draggable handle */}
+          <div
+            className="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full"
+            style={{ left: `calc(${progress}% - 8px)` }}
+          />
+        </div>
+
+        <span>{formatTime(duration)}</span>
       </div>
+
     </div>
   );
 }
