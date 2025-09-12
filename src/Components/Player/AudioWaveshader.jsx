@@ -1,17 +1,63 @@
 // src/AudioWaterShader.jsx
 import React, { useEffect, useRef, useState } from "react";
 import * as THREE from "three";
-import LightBlocksBackground from "./LightBlockBackground";
-import Aurora from "./aurora";
+import { Play, Pause, SkipBack, SkipForward } from "lucide-react";
 
 export default function AudioWaterShader() {
   const containerRef = useRef(null);
-  const audioRef = useRef(null);
+  const audioRef = useRef(null); // single audio element used by UI + analyser
 
+  // WebAudio refs (analyser + context + source)
+  const audioCtxRef = useRef(null);
+  const analyserRef = useRef(null);
+  const dataArrayRef = useRef(null);
+  const sourceNodeRef = useRef(null);
+  const playingRef = useRef(false);
+
+  // Player state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [progress, setProgress] = useState(0);
+  const [currentTrack, setCurrentTrack] = useState(0);
+
+  // Your playlist
+  const tracks = [
+    {
+      title: "Electronic Future Beats",
+      artist: "DJ Xor",
+      src: "https://assets.codepen.io/7558/xor-is-epic-1446.mp3",
+      cover: "https://picsum.photos/200/200?random=1",
+    },
+    {
+      title: "Night Drive",
+      artist: "Synthwave",
+      src: "https://cdn.pixabay.com/download/audio/2022/01/18/audio_5be6fbf83a.mp3",
+      cover: "https://picsum.photos/200/200?random=2",
+    },
+    {
+      title: "Chill Horizon",
+      artist: "Lo-Fi",
+      src: "https://cdn.pixabay.com/download/audio/2021/10/25/audio_5d8c86c825.mp3",
+      cover: "https://picsum.photos/200/200?random=3",
+    },
+  ];
+
+  // format time helper
+  const formatTime = (sec) => {
+    if (!sec || isNaN(sec)) return "0:00";
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60).toString().padStart(2, "0");
+    return `${m}:${s}`;
+  };
+
+  // Attach time + loadedmetadata listeners to the real <audio> element
   useEffect(() => {
-    const audio = new Audio('/song.mp3');
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    // ensure CORS for analyser
     audio.crossOrigin = "anonymous";
-    audioRef.current = audio;
 
     const onLoaded = () => setDuration(audio.duration || 0);
     const onTime = () => {
@@ -25,81 +71,60 @@ export default function AudioWaterShader() {
     return () => {
       audio.removeEventListener("loadedmetadata", onLoaded);
       audio.removeEventListener("timeupdate", onTime);
-      try { audio.pause(); audio.src = ""; } catch (e) { }
     };
   }, []);
 
-
-
-  const audioCtxRef = useRef(null);
-  const analyserRef = useRef(null);
-  const dataArrayRef = useRef(null);
-  const sourceNodeRef = useRef(null);
-  const playingRef = useRef(false);
-
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [currentTime, setCurrentTime] = useState(0);
-  const [progress, setProgress] = useState(0);
-
-  // format time helper
-  const formatTime = (sec) => {
-    if (!sec || isNaN(sec)) return "0:00";
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60).toString().padStart(2, "0");
-    return `${m}:${s}`;
-  };
-
-  // ---------- AUDIO: setup listeners for UI (timeupdate / loadedmetadata)
+  // When track changes, update progress and keep playing if we were playing
   useEffect(() => {
     const audio = audioRef.current;
-    audio.crossOrigin = "anonymous";
-    const onLoaded = () => setDuration(audio.duration || 0);
-    const onTime = () => {
-      setCurrentTime(audio.currentTime || 0);
-      setProgress(
-        audio.duration ? (audio.currentTime / audio.duration) * 100 : 0
-      );
-    };
+    if (!audio) return;
+    // set the src via React prop (below) — ensure play continues if playingRef is true
+    setProgress(0);
+    setCurrentTime(0);
+    if (playingRef.current) {
+      // try to continue playing new track
+      audio.play().catch((e) => {
+        console.warn("Auto play on track change failed:", e);
+      });
+    }
+  }, [currentTrack]);
 
-    audio.addEventListener("loadedmetadata", onLoaded);
-    audio.addEventListener("timeupdate", onTime);
-
-    return () => {
-      audio.removeEventListener("loadedmetadata", onLoaded);
-      audio.removeEventListener("timeupdate", onTime);
-      try {
-        audio.pause();
-        audio.src = "";
-      } catch (e) { }
-    };
-  }, []);
-
-  // Play/pause (React handler)
+  // Play/pause handler that also initializes AudioContext + analyser bound to the <audio> element
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) return;
 
-    if (!playingRef.current) {
-      // initialize audio analysis on first play
-      if (!audioCtxRef.current) {
-        try {
-          const ctx = new (window.AudioContext || window.webkitAudioContext)();
-          await ctx.resume();
-          audioCtxRef.current = ctx;
-          const analyser = ctx.createAnalyser();
-          analyser.fftSize = 256;
-          analyser.smoothingTimeConstant = 0.8;
-          analyserRef.current = analyser;
-          dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
-          sourceNodeRef.current = ctx.createMediaElementSource(audio);
-          sourceNodeRef.current.connect(analyser);
-          analyser.connect(ctx.destination);
-        } catch (e) {
-          console.warn("AudioContext init failed:", e);
-        }
-      }
+    // initialize audio analysis on first play (bind analyser to audio element)
+    if (!audioCtxRef.current) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        await ctx.resume();
+        audioCtxRef.current = ctx;
 
+        const analyser = ctx.createAnalyser();
+        analyser.fftSize = 256;
+        analyser.smoothingTimeConstant = 0.8;
+        analyserRef.current = analyser;
+        dataArrayRef.current = new Uint8Array(analyser.frequencyBinCount);
+
+        // create source from existing audio element (only once)
+        // if a previous source exists, disconnect it first
+        try {
+          if (sourceNodeRef.current) {
+            sourceNodeRef.current.disconnect();
+            sourceNodeRef.current = null;
+          }
+        } catch (e) { }
+
+        sourceNodeRef.current = ctx.createMediaElementSource(audio);
+        sourceNodeRef.current.connect(analyser);
+        analyser.connect(ctx.destination);
+      } catch (e) {
+        console.warn("AudioContext init failed:", e);
+      }
+    }
+
+    if (!playingRef.current) {
       try {
         await audio.play();
         playingRef.current = true;
@@ -114,13 +139,21 @@ export default function AudioWaterShader() {
     }
   };
 
-  // Seek handler (click on progress bar)
+  // Next / Prev
+  const handleNext = () => {
+    setCurrentTrack((prev) => (prev + 1) % tracks.length);
+  };
+  const handlePrev = () => {
+    setCurrentTrack((prev) => (prev - 1 + tracks.length) % tracks.length);
+  };
+
+  // Seek (click / drag)
   const progressBarRef = useRef(null);
   const isDraggingRef = useRef(false);
 
   const updateSeek = (clientX) => {
     const audio = audioRef.current;
-    if (!audio || !audio.duration) return;
+    if (!audio || !audio.duration || !progressBarRef.current) return;
 
     const rect = progressBarRef.current.getBoundingClientRect();
     const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
@@ -148,14 +181,13 @@ export default function AudioWaterShader() {
     updateSeek(clientX);
   };
 
-  const stopDrag = (e) => {
+  const stopDrag = () => {
     isDraggingRef.current = false;
     window.removeEventListener("mousemove", onDrag);
     window.removeEventListener("mouseup", stopDrag);
     window.removeEventListener("touchmove", onDrag);
     window.removeEventListener("touchend", stopDrag);
   };
-
 
   // ---------- THREE.JS effect (canvas, shader, simulation)
   useEffect(() => {
@@ -177,7 +209,6 @@ export default function AudioWaterShader() {
     renderer.domElement.style.display = "block";
     renderer.domElement.style.touchAction = "none";
     container.appendChild(renderer.domElement);
-
 
     // Put canvas sizing logic in one place
     function setSizeToContainer() {
@@ -507,44 +538,55 @@ export default function AudioWaterShader() {
   }, []); // run once
 
   // ========== JSX (controls + container)
-  // Change the container size here: style.width and style.height.
-  // Example: full-screen canvas -> style={{ width: "100vw", height: "100vh" }}
-  // Example: centered smaller -> width: "60vw", height: "60vh", margin: "auto"
   return (
-    <div style={{ width: "100vw", height: "100vh", position: "fixed", inset: 0, margin: 0, padding: 0, overflow: "hidden", background: "transparent" }}>
-      {/* Container: change its width/height to move/scale the shader */}
-{/* 
-      <Aurora
-        colorStops={["#3A29FF", "#FF94B4", "#FF3232"]}
-        blend={0.5}
-        amplitude={1.0}
-        speed={0.5}
-      /> */}
-      <div ref={containerRef} style={{ width: "60%", height: "60%", position: "absolute", left: "50%", top: "50%", transform: "translate(-50%, -50%)" }} />
+    <div style={{ width: "100vw", height: "100vh", inset: 0, margin: 0, padding: 0, overflow: "hidden", background: "#000000" }}>
 
-      <div className="w-full flex items-center gap-3 text-sm text-white/80 font-mono">
-        <span>{formatTime(currentTime)}</span>
-        <button onClick={togglePlay} className="px-3 py-1 border border-white/30 rounded hover:bg-white/10 transition text-white" > {isPlaying ? "⏸️" : "▶️"} </button>
-        <div
-          className="flex-1 h-1 bg-white/30 rounded-full relative cursor-pointer"
-          ref={progressBarRef}
-          onMouseDown={startDrag}
-          onTouchStart={startDrag}
-        >
-          <div
-            className="h-1 bg-white rounded-full"
-            style={{ width: `${progress}%` }}
-          />
-          {/* draggable handle */}
-          <div
-            className="absolute top-1/2 -translate-y-1/2 w-4 h-4 bg-white rounded-full"
-            style={{ left: `calc(${progress}% - 8px)` }}
-          />
+      <div className="w-screen h-screen flex items-center justify-between">
+        <div ref={containerRef} style={{ zIndex: 0, width: "100%", height: "100%", }} className="mt-[0vh] scale-115 translate-x-[-7vw]" />
+      </div>
+      <div className="fixed bottom-6 left-1/2 -translate-x-1/2 w-[40vw] h-[25vh] bg-black/20 backdrop-blur-2xl text-black border border-white/20 rounded-2xl shadow-2xl p-4 flex flex-col items-center z-40">
+        {/* <img src={tracks[currentTrack].cover} alt="cover" className="w-20 h-20 rounded-xl mb-2 object-cover shadow-lg" /> */}
+        <div className="text-center">
+          <h3 className="text-sm font-semibold">{tracks[currentTrack].title}</h3>
+          <p className="text-xs text-neutral-400">{tracks[currentTrack].artist}</p>
         </div>
 
-        <span>{formatTime(duration)}</span>
-      </div>
+        {/* Progress */}
+        <div ref={progressBarRef} className="w-full h-2 bg-neutral-700 rounded-full mt-3 mb-3 relative cursor-pointer" onMouseDown={startDrag} onTouchStart={startDrag}>
+          <div className="h-2 bg-gradient-to-r from-purple-500 to-pink-500 rounded-full" style={{ width: `${progress}%` }} />
+          <div className="absolute -top-2 left-0" style={{ transform: `translateX(${progress}% ) translateX(-8px)` }}>
+            <div className="w-4 h-4 bg-white rounded-full" />
+          </div>
+        </div>
 
+        {/* time and controls */}
+        <div className="w-full flex items-center justify-between text-xs text-neutral-400 mb-3">
+          <span>{formatTime(currentTime)}</span>
+          <span>{formatTime(duration)}</span>
+        </div>
+
+        <div className="flex items-center gap-6">
+          <button onClick={handlePrev} className="p-2 hover:bg-neutral-800 rounded-full transition"><SkipBack size={20} /></button>
+          <button onClick={togglePlay} className="p-3 bg-gradient-to-r from-purple-600 to-pink-500 rounded-full shadow-lg transition">
+            {isPlaying ? <Pause size={20} /> : <Play size={20} />}
+          </button>
+          <button onClick={handleNext} className="p-2 hover:bg-neutral-800 rounded-full transition"><SkipForward size={20} /></button>
+        </div>
+
+        {/* actual audio element used for playback & analyser */}
+        <audio
+          ref={audioRef}
+          src={tracks[currentTrack].src}
+          onTimeUpdate={() => {
+            // ensure UI is updated (timeupdate event already wired in useEffect, but keep this as safe fallback)
+            const audio = audioRef.current;
+            if (!audio) return;
+            setCurrentTime(audio.currentTime || 0);
+            setProgress(audio.duration ? (audio.currentTime / audio.duration) * 100 : 0);
+          }}
+          onEnded={handleNext}
+        />
+      </div>
     </div>
   );
 }
